@@ -23,6 +23,30 @@ struct LibrarySummary {
     import_name: Option<String>,
 }
 
+const DISCOVERY_SETTINGS_VERSION: &str = "bounded-v1";
+const DISCOVERY_ADAPTER_VERSION: &str = "1001tracklists-v1";
+const RANKING_VERSION: &str = "cooccurrence-v1";
+const MAX_APPEARANCES_PER_SEED: i64 = 25;
+const MAX_TRACKLISTS_PER_RUN: i64 = 100;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryRunSummary {
+    id: i64,
+    status: String,
+    stage: String,
+    message: Option<String>,
+    queued_jobs: i64,
+    running_jobs: i64,
+    completed_jobs: i64,
+    failed_jobs: i64,
+    total_jobs: i64,
+    max_appearances_per_seed: i64,
+    max_tracklists: i64,
+    created_at: String,
+    updated_at: String,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceSearchInput {
@@ -165,6 +189,252 @@ async fn library_summary(db: tauri::State<'_, SqlitePool>) -> Result<LibrarySumm
         skipped_seeds: row.get(5),
         import_name: row.get(6),
     })
+}
+
+async fn discovery_run_summary(
+    db: &SqlitePool,
+    run_id: Option<i64>,
+) -> Result<Option<DiscoveryRunSummary>, String> {
+    let row = sqlx::query(
+        "SELECT dr.id, dr.status, dr.stage, dr.message, dr.settings_json,
+                dr.created_at, dr.updated_at,
+                sum(CASE WHEN j.status = 'queued' THEN 1 ELSE 0 END),
+                sum(CASE WHEN j.status = 'running' THEN 1 ELSE 0 END),
+                sum(CASE WHEN j.status = 'completed' THEN 1 ELSE 0 END),
+                sum(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END),
+                count(j.id)
+         FROM discovery_runs dr
+         LEFT JOIN jobs j ON j.run_id = dr.id
+         WHERE dr.id = COALESCE(?, (
+           SELECT dr2.id FROM discovery_runs dr2
+           WHERE dr2.import_id = (SELECT id FROM imports ORDER BY id DESC LIMIT 1)
+           ORDER BY dr2.id DESC LIMIT 1
+         ))
+         GROUP BY dr.id",
+    )
+    .bind(run_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some(row) = row else { return Ok(None) };
+    let settings: serde_json::Value = serde_json::from_str(row.get::<String, _>(4).as_str())
+        .map_err(|e| format!("Stored discovery settings are invalid: {e}"))?;
+    Ok(Some(DiscoveryRunSummary {
+        id: row.get(0),
+        status: row.get(1),
+        stage: row.get(2),
+        message: row.get(3),
+        max_appearances_per_seed: settings
+            .get("maxAppearancesPerSeed")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(MAX_APPEARANCES_PER_SEED),
+        max_tracklists: settings
+            .get("maxTracklists")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(MAX_TRACKLISTS_PER_RUN),
+        created_at: row.get(5),
+        updated_at: row.get(6),
+        queued_jobs: row.get(7),
+        running_jobs: row.get(8),
+        completed_jobs: row.get(9),
+        failed_jobs: row.get(10),
+        total_jobs: row.get(11),
+    }))
+}
+
+async fn create_discovery_run_record(db: &SqlitePool) -> Result<DiscoveryRunSummary, String> {
+    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+    let import_id: i64 = sqlx::query_scalar("SELECT id FROM imports ORDER BY id DESC LIMIT 1")
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Import a playlist before preparing discovery".to_string())?;
+
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM seed_matches sm
+         JOIN import_rows ir ON ir.id = sm.import_row_id
+         WHERE ir.import_id=? AND ir.selected_seed=1 AND sm.status='pending'",
+    )
+    .bind(import_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if pending > 0 {
+        return Err("Finish reviewing every selected seed before preparing discovery".into());
+    }
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM discovery_runs
+         WHERE import_id=? AND status IN ('queued','running','waiting_for_review','waiting_for_browser','paused')
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(import_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if existing.is_some() {
+        return Err("This playlist already has an active discovery run".into());
+    }
+
+    let seeds = sqlx::query(
+        "SELECT min(ir.id), st.id, st.provider_id, st.url
+         FROM seed_matches sm
+         JOIN import_rows ir ON ir.id = sm.import_row_id
+         JOIN source_tracks st ON st.id = sm.source_track_id
+         WHERE ir.import_id=? AND ir.selected_seed=1 AND sm.status='accepted'
+         GROUP BY st.id, st.provider_id, st.url
+         ORDER BY min(ir.row_number)",
+    )
+    .bind(import_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if seeds.is_empty() {
+        return Err("Confirm at least one exact seed match before preparing discovery".into());
+    }
+    if seeds.len() > 20 {
+        return Err("A discovery run can use at most 20 seeds".into());
+    }
+
+    let settings = serde_json::json!({
+        "version": DISCOVERY_SETTINGS_VERSION,
+        "maxSeeds": 20,
+        "maxAppearancesPerSeed": MAX_APPEARANCES_PER_SEED,
+        "maxTracklists": MAX_TRACKLISTS_PER_RUN,
+        "selectionPolicy": "round-robin-seeds-v1"
+    });
+    let run_id: i64 = sqlx::query(
+        "INSERT INTO discovery_runs(import_id,status,stage,settings_json,adapter_version,ranking_version,message)
+         VALUES(?,'queued','fetching_appearances',?,?,?,?) RETURNING id",
+    )
+    .bind(import_id)
+    .bind(settings.to_string())
+    .bind(DISCOVERY_ADAPTER_VERSION)
+    .bind(RANKING_VERSION)
+    .bind("Queue prepared. Live source execution remains gated until access verification passes.")
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .get(0);
+
+    for (seed_order, seed) in seeds.into_iter().enumerate() {
+        let import_row_id: i64 = seed.get(0);
+        let source_track_id: i64 = seed.get(1);
+        let provider_id: String = seed.get(2);
+        let source_url: String = seed.get(3);
+        let payload = serde_json::json!({
+            "seedOrder": seed_order,
+            "importRowId": import_row_id,
+            "sourceTrackId": source_track_id,
+            "sourceUrl": source_url,
+            "appearanceLimit": MAX_APPEARANCES_PER_SEED
+        });
+        sqlx::query(
+            "INSERT INTO jobs(run_id,job_key,kind,status,payload_json,created_at,updated_at)
+             VALUES(?,?,'fetch_appearances','queued',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+        )
+        .bind(run_id)
+        .bind(format!("appearances:{provider_id}"))
+        .bind(payload.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    discovery_run_summary(db, Some(run_id))
+        .await?
+        .ok_or_else(|| "The discovery run could not be loaded after creation".to_string())
+}
+
+async fn update_discovery_run_status(
+    db: &SqlitePool,
+    run_id: i64,
+    action: &str,
+) -> Result<DiscoveryRunSummary, String> {
+    let (from, status, message) = match action {
+        "pause" => (
+            vec!["queued", "running", "waiting_for_browser"],
+            "paused",
+            "Run paused. Completed source work will be retained.",
+        ),
+        "resume" => (
+            vec!["paused", "waiting_for_browser"],
+            "queued",
+            "Run queued to resume from persisted work.",
+        ),
+        "cancel" => (
+            vec!["queued", "running", "waiting_for_browser", "paused"],
+            "cancelled",
+            "Run cancelled. Completed source work has been retained.",
+        ),
+        _ => return Err("Discovery action must be pause, resume, or cancel".into()),
+    };
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT status FROM discovery_runs WHERE id=?")
+            .bind(run_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| e.to_string())?;
+    let current = current.ok_or_else(|| "Discovery run not found".to_string())?;
+    if !from.contains(&current.as_str()) {
+        return Err(format!(
+            "Cannot {action} a discovery run in {current} status"
+        ));
+    }
+    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE discovery_runs SET status=?, message=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+    .bind(status)
+    .bind(message)
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if action == "cancel" {
+        sqlx::query(
+            "UPDATE jobs SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+             WHERE run_id=? AND status IN ('queued','running')",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    } else if action == "pause" {
+        sqlx::query(
+            "UPDATE jobs SET status='queued', updated_at=CURRENT_TIMESTAMP
+             WHERE run_id=? AND status='running'",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    discovery_run_summary(db, Some(run_id))
+        .await?
+        .ok_or_else(|| "Discovery run not found".to_string())
+}
+
+#[tauri::command]
+async fn latest_discovery_run(
+    db: tauri::State<'_, SqlitePool>,
+) -> Result<Option<DiscoveryRunSummary>, String> {
+    discovery_run_summary(db.inner(), None).await
+}
+
+#[tauri::command]
+async fn start_discovery(db: tauri::State<'_, SqlitePool>) -> Result<DiscoveryRunSummary, String> {
+    create_discovery_run_record(db.inner()).await
+}
+
+#[tauri::command]
+async fn control_discovery(
+    run_id: i64,
+    action: String,
+    db: tauri::State<'_, SqlitePool>,
+) -> Result<DiscoveryRunSummary, String> {
+    update_discovery_run_status(db.inner(), run_id, &action).await
 }
 
 #[tauri::command]
@@ -382,8 +652,133 @@ pub fn run() {
             set_seed,
             resolve_seed,
             search_source,
-            verify_source_track
+            verify_source_track,
+            latest_discovery_run,
+            start_discovery,
+            control_discovery
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hekt");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn test_pool() -> (TempDir, SqlitePool) {
+        let directory = tempfile::tempdir().unwrap();
+        let options = SqliteConnectOptions::from_str(&format!(
+            "sqlite://{}",
+            directory.path().join("test.db").display()
+        ))
+        .unwrap()
+        .create_if_missing(true)
+        .foreign_keys(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        (directory, pool)
+    }
+
+    async fn add_accepted_seed(pool: &SqlitePool, import_id: i64, row_number: i64) {
+        let row_id: i64 = sqlx::query(
+            "INSERT INTO import_rows(import_id,row_number,artist,title,original_json,selected_seed)
+             VALUES(?,?,?,?,'{}',1) RETURNING id",
+        )
+        .bind(import_id)
+        .bind(row_number)
+        .bind(format!("Artist {row_number}"))
+        .bind(format!("Title {row_number}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get(0);
+        let provider_id = format!("track-{row_number}");
+        let source_id: i64 = sqlx::query(
+            "INSERT INTO source_tracks(provider,provider_id,artist,title,adapter_version,url)
+             VALUES('1001tracklists',?,?,?,'manual-v1',?) RETURNING id",
+        )
+        .bind(&provider_id)
+        .bind(format!("Artist {row_number}"))
+        .bind(format!("Title {row_number}"))
+        .bind(format!(
+            "https://www.1001tracklists.com/track/{provider_id}/title.html"
+        ))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get(0);
+        sqlx::query(
+            "INSERT INTO seed_matches(import_row_id,source_track_id,status,matched_manually)
+             VALUES(?,?,'accepted',1)",
+        )
+        .bind(row_id)
+        .bind(source_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn creates_an_idempotent_bounded_queue_and_controls_its_lifecycle() {
+        tauri::async_runtime::block_on(async {
+            let (_directory, pool) = test_pool().await;
+            let import_id: i64 = sqlx::query(
+                "INSERT INTO imports(name,source_path,encoding,delimiter)
+                 VALUES('Test','/test.txt','UTF-8','tab') RETURNING id",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+            add_accepted_seed(&pool, import_id, 1).await;
+            add_accepted_seed(&pool, import_id, 2).await;
+
+            let run = create_discovery_run_record(&pool).await.unwrap();
+            assert_eq!(run.status, "queued");
+            assert_eq!(run.stage, "fetching_appearances");
+            assert_eq!(run.total_jobs, 2);
+            assert_eq!(run.queued_jobs, 2);
+            assert_eq!(run.max_appearances_per_seed, 25);
+            assert_eq!(run.max_tracklists, 100);
+
+            let keys: Vec<String> = sqlx::query_scalar(
+                "SELECT job_key FROM jobs WHERE run_id=? ORDER BY json_extract(payload_json,'$.seedOrder')",
+            )
+            .bind(run.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(keys, vec!["appearances:track-1", "appearances:track-2"]);
+            assert!(create_discovery_run_record(&pool)
+                .await
+                .unwrap_err()
+                .contains("active discovery run"));
+
+            let paused = update_discovery_run_status(&pool, run.id, "pause")
+                .await
+                .unwrap();
+            assert_eq!(paused.status, "paused");
+            let resumed = update_discovery_run_status(&pool, run.id, "resume")
+                .await
+                .unwrap();
+            assert_eq!(resumed.status, "queued");
+            let cancelled = update_discovery_run_status(&pool, run.id, "cancel")
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status, "cancelled");
+            let cancelled_jobs: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE run_id=? AND status='cancelled'",
+            )
+            .bind(run.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(cancelled_jobs, 2);
+
+            let replacement = create_discovery_run_record(&pool).await.unwrap();
+            assert_ne!(replacement.id, run.id);
+            assert_eq!(replacement.total_jobs, 2);
+        });
+    }
 }

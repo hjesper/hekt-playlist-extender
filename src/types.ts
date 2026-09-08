@@ -50,3 +50,19 @@ export type SourceTrackDetail = {
   title: string;
   appearances: Array<{url: string; label: string}>;
 };
+
+export type DiscoveryRun = {
+  id: number;
+  status: "queued" | "running" | "waiting_for_review" | "waiting_for_browser" | "paused" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+  stage: "matching" | "fetching_appearances" | "fetching_tracklists" | "ranking";
+  message?: string;
+  queuedJobs: number;
+  runningJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+  totalJobs: number;
+  maxAppearancesPerSeed: number;
+  maxTracklists: number;
+  createdAt: string;
+  updatedAt: string;
+};

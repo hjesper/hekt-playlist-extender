@@ -1,9 +1,9 @@
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Check, ChevronRight, Disc3, Download, ExternalLink, Headphones, Library, ListMusic, Music2, Search, Settings, Sparkles, Upload, X } from "lucide-react";
-import { getSummary, importPlaylist, loadTracks, previewPlaylist, resolveSeed, searchSource, setSeed, verifySourceTrack } from "./api";
-import type { ImportPreview, LibrarySummary, SourceSearchResult, SourceTrackDetail, Track } from "./types";
+import { AlertTriangle, Check, ChevronRight, Disc3, Download, ExternalLink, Headphones, Library, ListMusic, Music2, Pause, Play, Search, Settings, Sparkles, Upload, X } from "lucide-react";
+import { controlDiscovery, getLatestDiscoveryRun, getSummary, importPlaylist, loadTracks, previewPlaylist, resolveSeed, searchSource, setSeed, startDiscovery, verifySourceTrack } from "./api";
+import type { DiscoveryRun, ImportPreview, LibrarySummary, SourceSearchResult, SourceTrackDetail, Track } from "./types";
 
 type Page = "library" | "import" | "discover" | "settings";
 const nav = [
@@ -95,11 +95,35 @@ function ImportPage({onComplete}:{onComplete:()=>void}) {
 }
 
 function DiscoverPage({summary,onReview}:{summary?:LibrarySummary;onReview:()=>void}) {
+  const client = useQueryClient();
+  const run = useQuery({queryKey:["discovery-run"],queryFn:getLatestDiscoveryRun});
+  const start = useMutation({mutationFn:startDiscovery,onSuccess:data => client.setQueryData(["discovery-run"],data)});
+  const control = useMutation({mutationFn:({runId,action}:{runId:number;action:"pause"|"resume"|"cancel"}) => controlDiscovery(runId,action),onSuccess:data => client.setQueryData(["discovery-run"],data)});
+  const error = run.error ?? start.error ?? control.error;
+  const canStart = !run.data || ["cancelled","completed","completed_with_errors","failed"].includes(run.data.status);
   if (!summary?.selectedSeeds) return <section className="page"><Empty title="Discovery is ready for seeds" body="Import a playlist and select tracks before starting an evidence-backed discovery run." icon={<Sparkles/>} action="Review seed tracks" onAction={onReview}/></section>;
   if (summary.pendingSeeds) return <section className="page"><Empty title={`${summary.pendingSeeds} seed match${summary.pendingSeeds === 1 ? "" : "es"} need review`} body="Every selected seed must be confirmed or explicitly skipped before discovery can start." icon={<AlertTriangle/>} action="Finish match review" onAction={onReview}/></section>;
   if (!summary.acceptedSeeds) return <section className="page"><Empty title="No confirmed seeds yet" body="Every selected track was skipped. Confirm at least one exact recording before starting discovery." icon={<AlertTriangle/>} action="Review seed tracks" onAction={onReview}/></section>;
-  return <section className="page"><Empty title="Seeds are ready" body={`${summary.acceptedSeeds} confirmed seed${summary.acceptedSeeds === 1 ? "" : "s"}; ${summary.skippedSeeds} skipped. Live discovery remains disabled until the source-access spike is validated.`} icon={<Sparkles/>} action="Review seed tracks" onAction={onReview}/></section>;
+  if (run.isLoading) return <section className="page"><Empty title="Loading discovery" body="Reading persisted run state from the local library." icon={<Sparkles/>} action="Review seed tracks" onAction={onReview}/></section>;
+  return <section className="page">
+    <div className="page-title"><div><p className="eyebrow">BOUNDED DISCOVERY</p><h1>Discover</h1><p>Prepare a durable, resumable source queue from your confirmed seeds.</p></div>{canStart && <button className="primary" onClick={() => start.mutate()} disabled={start.isPending}><Play size={17}/>{start.isPending ? "Preparing…" : run.data ? "Prepare another run" : "Prepare discovery run"}</button>}</div>
+    {error && <div className="error"><X size={18}/>{String(error)}</div>}
+    {!run.data ? <div className="discovery-ready panel"><div><span className="pill">Phase 2 foundation</span><h2>{summary.acceptedSeeds} confirmed seed{summary.acceptedSeeds === 1 ? "" : "s"} ready</h2><p>The run will create one durable appearance job per seed in playlist order. This records bounded settings and makes future retries idempotent.</p></div><div className="budget-grid"><Budget value="25" label="appearances per seed"/><Budget value="100" label="unique tracklists"/><Budget value="1" label="active page"/></div><div className="warning"><AlertTriangle size={17}/><span>Live execution remains gated until the visible-browser access check passes. Preparing the queue makes no source requests.</span></div></div>
+    : <DiscoveryRunCard
+        run={run.data}
+        busy={control.isPending}
+        onControl={action => control.mutate({runId:run.data!.id,action})}
+      />}
+  </section>;
 }
+
+function DiscoveryRunCard({run,busy,onControl}:{run:DiscoveryRun;busy:boolean;onControl:(action:"pause"|"resume"|"cancel")=>void}) {
+  const finished = run.completedJobs + run.failedJobs;
+  const progress = run.totalJobs ? Math.round((finished / run.totalJobs) * 100) : 0;
+  return <div className="run-card panel"><div className="run-heading"><div><span className={`run-status ${run.status}`}>{run.status.replaceAll("_"," ")}</span><h2>Discovery run #{run.id}</h2><p>{run.message}</p></div><div className="run-actions">{["queued","running","waiting_for_browser"].includes(run.status) && <button onClick={() => onControl("pause")} disabled={busy}><Pause size={15}/>Pause</button>}{["paused","waiting_for_browser"].includes(run.status) && <button className="primary compact" onClick={() => onControl("resume")} disabled={busy}><Play size={15}/>Resume</button>}{!["cancelled","completed","completed_with_errors","failed"].includes(run.status) && <button onClick={() => onControl("cancel")} disabled={busy}>Cancel</button>}</div></div><div className="progress-track"><span style={{width:`${progress}%`}}/></div><div className="run-stats"><Budget value={run.totalJobs} label="seed jobs"/><Budget value={run.queuedJobs} label="queued"/><Budget value={run.completedJobs} label="completed"/><Budget value={run.failedJobs} label="failed"/></div><div className="run-meta"><span>Stage <b>{run.stage.replaceAll("_"," ")}</b></span><span>Bounds <b>{run.maxAppearancesPerSeed} appearances · {run.maxTracklists} tracklists</b></span><span>Policy <b>round-robin seeds</b></span></div></div>;
+}
+
+function Budget({value,label}:{value:string|number;label:string}){return <div className="budget"><strong>{value}</strong><span>{label}</span></div>}
 
 function SettingsPage(){ return <section className="page narrow"><p className="eyebrow">CONFIGURATION</p><h1>Settings</h1><div className="panel settings"><h2>Source connections</h2><Setting title="1001Tracklists adapter" text="Not configured — live access must pass the Phase 0 spike."/><Setting title="YouTube Data API" text="No key stored. Credentials will be kept in the macOS keychain."/><Setting title="Browser session" text="Installed Chrome · dedicated profile"/></div></section> }
 function Setting({title,text}:{title:string;text:string}){return <div className="setting"><div><b>{title}</b><p>{text}</p></div><button disabled>Not available yet</button></div>}

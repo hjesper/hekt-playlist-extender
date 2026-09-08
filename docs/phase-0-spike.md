@@ -46,3 +46,5 @@ The sample also exposes metadata that needs manual review rather than aggressive
 Do not start the crawler or recommendation phases yet. Search coverage and sidecar packaging are useful enough to keep testing, but the discovery-to-evidence path has not passed: track-detail access is currently challenged and playback remains unverified.
 
 The visible-browser challenge pause/resume increment is now implemented: match review can open a track page in the dedicated Chrome profile, wait for normal user interaction for up to three minutes, and resume extraction automatically. It still needs a live verification against the observed Turnstile page. If detail pages remain inaccessible after normal user interaction, reassess user-supplied evidence URLs or the 1001Tracklists integration itself before investing in durable crawling.
+
+Phase 2 queue groundwork has started without crossing that gate: the app can persist a bounded run and one idempotent appearance job per unique confirmed source track, with pause, resume, and cancel state transitions. Preparing this queue performs no source requests; live job execution remains disabled until access is verified.
