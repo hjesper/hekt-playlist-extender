@@ -6,7 +6,7 @@ export const Request = z.object({
   requestId: z.string().min(1).max(128),
   operation: z.enum(["searchTracks", "fetchTrack", "fetchAppearances", "fetchTracklist"]),
   payload: z.record(z.string(), z.unknown()),
-  timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
+  timeoutMs: z.number().int().min(1_000).max(300_000).default(30_000),
 });
 export type Request = z.infer<typeof Request>;
 export type Response = { version: 1; requestId: string; ok: true; result: unknown } | { version: 1; requestId: string; ok: false; error: { code: string; message: string; retryable: boolean } };
@@ -20,6 +20,8 @@ export const SearchTracksPayload = z.object({
 
 export const FetchTrackPayload = z.object({
   url: z.string().url(),
+  interactive: z.boolean().default(false),
+  challengeTimeoutMs: z.number().int().min(5_000).max(300_000).default(180_000),
 });
 
 export function errorResponse(requestId: string, code: string, message: string, retryable = false): Response {

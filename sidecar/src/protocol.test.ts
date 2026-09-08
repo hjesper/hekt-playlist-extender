@@ -13,9 +13,14 @@ describe("sidecar protocol", () => {
   });
   it("accepts only a real 1001Tracklists track URL", () => {
     const value = FetchTrackPayload.parse({ url: "https://www.1001tracklists.com/track/abc/example/index.html" });
+    expect(value).toMatchObject({ interactive: false, challengeTimeoutMs: 180_000 });
     expect(validateSourceTrackUrl(value.url).pathname).toBe("/track/abc/example/index.html");
     expect(() => validateSourceTrackUrl("http://www.1001tracklists.com/track/abc/example/index.html")).toThrow(/Only HTTPS/);
     expect(() => validateSourceTrackUrl("https://evil.example/track/abc/example/index.html")).toThrow(/Only HTTPS/);
     expect(() => validateSourceTrackUrl("https://www.1001tracklists.com/search/result.php")).toThrow(/Only HTTPS/);
+  });
+  it("bounds interactive challenge waits", () => {
+    expect(FetchTrackPayload.parse({ url: "https://www.1001tracklists.com/track/abc/example/index.html", interactive: true, challengeTimeoutMs: 300_000 }).interactive).toBe(true);
+    expect(() => FetchTrackPayload.parse({ url: "https://www.1001tracklists.com/track/abc/example/index.html", challengeTimeoutMs: 300_001 })).toThrow();
   });
 });

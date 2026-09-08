@@ -3,7 +3,11 @@ mod parser;
 use parser::{parse_playlist, ImportPreview};
 use serde::Serialize;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 
@@ -26,6 +30,64 @@ struct SourceSearchInput {
     title: String,
     version: Option<String>,
     limit: Option<u8>,
+}
+
+static SOURCE_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+async fn run_source_adapter(
+    app: &tauri::AppHandle,
+    operation: &str,
+    payload: serde_json::Value,
+    timeout_ms: u64,
+    visible: bool,
+) -> Result<serde_json::Value, String> {
+    let profile = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate application data: {error}"))?
+        .join("browser-profile");
+    std::fs::create_dir_all(&profile)
+        .map_err(|error| format!("Could not create the dedicated browser profile: {error}"))?;
+    let request = serde_json::json!({
+        "version": 1,
+        "requestId": format!("ui-{}-{}", std::process::id(), SOURCE_REQUEST_ID.fetch_add(1, Ordering::Relaxed)),
+        "operation": operation,
+        "payload": payload,
+        "timeoutMs": timeout_ms
+    });
+    let output = app
+        .shell()
+        .sidecar("hekt-source-adapter")
+        .map_err(|error| format!("Could not prepare source adapter: {error}"))?
+        .env("HEKT_BROWSER_PROFILE", profile)
+        .env("HEKT_BROWSER_HEADLESS", if visible { "0" } else { "1" })
+        .arg(request.to_string())
+        .output()
+        .await
+        .map_err(|error| format!("Could not run source adapter: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Source adapter failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Source adapter returned invalid data: {error}"))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        let code = response
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("SOURCE_ERROR");
+        let message = response
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Source request failed");
+        return Err(format!("{code}: {message}"));
+    }
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
@@ -51,40 +113,33 @@ async fn search_source(
     if !(1..=25).contains(&limit) {
         return Err("Source search limit must be between 1 and 25".into());
     }
-    let request = serde_json::json!({
-        "version": 1,
-        "requestId": format!("ui-{}", std::process::id()),
-        "operation": "searchTracks",
-        "payload": { "artist": artist, "title": title, "version": input.version, "limit": limit },
-        "timeoutMs": 45_000
-    });
-    let output = app
-        .shell()
-        .sidecar("hekt-source-adapter")
-        .map_err(|error| format!("Could not prepare source adapter: {error}"))?
-        .arg(request.to_string())
-        .output()
-        .await
-        .map_err(|error| format!("Could not run source adapter: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Source adapter failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("Source adapter returned invalid data: {error}"))?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        let message = response
-            .pointer("/error/message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Source search failed");
-        return Err(message.to_string());
-    }
-    Ok(response
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null))
+    run_source_adapter(
+        &app,
+        "searchTracks",
+        serde_json::json!({ "artist": artist, "title": title, "version": input.version, "limit": limit }),
+        45_000,
+        false,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn verify_source_track(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    run_source_adapter(
+        &app,
+        "fetchTrack",
+        serde_json::json!({
+            "url": url,
+            "interactive": true,
+            "challengeTimeoutMs": 180_000
+        }),
+        240_000,
+        true,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -326,7 +381,8 @@ pub fn run() {
             import_playlist,
             set_seed,
             resolve_seed,
-            search_source
+            search_source,
+            verify_source_track
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hekt");

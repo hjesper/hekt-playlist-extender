@@ -2,13 +2,13 @@ import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, Check, ChevronRight, Disc3, Download, ExternalLink, Headphones, Library, ListMusic, Music2, Search, Settings, Sparkles, Upload, X } from "lucide-react";
-import { getSummary, importPlaylist, loadTracks, previewPlaylist, resolveSeed, searchSource, setSeed } from "./api";
-import type { ImportPreview, LibrarySummary, SourceSearchResult, Track } from "./types";
+import { getSummary, importPlaylist, loadTracks, previewPlaylist, resolveSeed, searchSource, setSeed, verifySourceTrack } from "./api";
+import type { ImportPreview, LibrarySummary, SourceSearchResult, SourceTrackDetail, Track } from "./types";
 
 type Page = "library" | "import" | "discover" | "settings";
 const nav = [
-  { id: "library" as const, label: "Library", icon: Library },
   { id: "import" as const, label: "Import & match", icon: Upload },
+  { id: "library" as const, label: "Library", icon: Library },
   { id: "discover" as const, label: "Discover", icon: Sparkles },
   { id: "settings" as const, label: "Settings", icon: Settings },
 ];
@@ -45,18 +45,34 @@ function LibraryPage({ summary, tracks, onImport }: { summary?: LibrarySummary; 
   const [reviewing, setReviewing] = useState<number>();
   const [sourceUrls, setSourceUrls] = useState<Record<number, string>>({});
   const [sourceResults, setSourceResults] = useState<Record<number, SourceSearchResult>>({});
+  const [verifiedTracks, setVerifiedTracks] = useState<Record<number, SourceTrackDetail>>({});
   const refresh = () => { client.invalidateQueries({queryKey:["tracks"]}); client.invalidateQueries({queryKey:["summary"]}); };
   const seed = useMutation({ mutationFn: ({id, selected}:{id:number;selected:boolean}) => setSeed(id, selected), onSuccess: refresh });
   const resolution = useMutation({ mutationFn: ({id,status,url}:{id:number;status:"pending"|"accepted"|"skipped";url?:string}) => resolveSeed(id,status,url), onSuccess: () => { refresh(); setReviewing(undefined); } });
   const lookup = useMutation({ mutationFn: ({track,broad=false}:{track:Track;broad?:boolean}) => searchSource(track,broad), onSuccess: (result, {track}) => setSourceResults(values => ({...values,[track.id]:result})) });
-  const error = seed.error ?? resolution.error ?? lookup.error;
+  const verification = useMutation({ mutationFn: ({id,url}:{id:number;url:string}) => verifySourceTrack(url), onSuccess: (result, {id}) => setVerifiedTracks(values => ({...values,[id]:result})) });
+  const error = seed.error ?? resolution.error ?? lookup.error ?? verification.error;
   return <section className="page">
     <div className="page-title"><div><p className="eyebrow">YOUR COLLECTION</p><h1>Library</h1><p>Review imported tracks and choose the strongest seeds for discovery.</p></div><button className="primary" onClick={onImport}><Upload size={17}/> Import playlist</button></div>
     <div className="stats"><Stat value={summary?.tracks ?? 0} label="Tracks in latest import"/><Stat value={summary?.selectedSeeds ?? 0} label="Selected seeds"/><Stat value={summary?.acceptedSeeds ?? 0} label="Confirmed matches" muted={!summary?.acceptedSeeds}/></div>
     {error && <div className="error"><X size={18}/>{String(error)}</div>}
     <div className="panel"><div className="panel-head"><div><h2>{summary?.importName ?? "Latest playlist"}</h2><p>{summary?.imports ? `${summary.pendingSeeds} seed match${summary.pendingSeeds === 1 ? "" : "es"} still need review` : "No playlist imported yet"}</p></div><span className="pill">{tracks.length} tracks</span></div>
       {tracks.length ? <div className="track-list"><div className="track-row labels"><span>#</span><span>Track</span><span>Details</span><span>Seed & match</span></div>{tracks.map(track => <Fragment key={track.id}><div className="track-row"><span className="number">{String(track.rowNumber).padStart(2,"0")}</span><span><b>{track.title || "Missing title"}</b><small>{track.artist || "Missing artist"}</small></span><span><small>{[track.version, track.label, track.bpm && `${track.bpm} BPM`].filter(Boolean).join(" · ") || "No extra metadata"}</small></span><span className="seed-cell"><button aria-label={`Toggle ${track.title} as seed`} className={`seed ${track.selected ? "selected" : ""}`} disabled={seed.isPending} onClick={() => seed.mutate({id:track.id,selected:!track.selected})}>{track.selected ? <Check size={15}/> : "+"}</button>{track.selected && <button className={`match-chip ${track.matchStatus ?? "pending"}`} onClick={() => setReviewing(reviewing === track.id ? undefined : track.id)}>{track.matchStatus ?? "pending"}</button>}</span></div>
-        {reviewing === track.id && track.selected && <div className="match-review"><div><b>Confirm this exact recording</b><p>Search the source or paste its track page. Nothing is accepted automatically; confirm the recording and version yourself.</p></div><div className="source-search-actions"><button className="source-search-button" onClick={() => lookup.mutate({track})} disabled={lookup.isPending}>{lookup.isPending ? "Searching installed Chrome…" : "Search 1001Tracklists"}</button>{track.version && <button onClick={() => lookup.mutate({track,broad:true})} disabled={lookup.isPending}>Search without version</button>}</div>{sourceResults[track.id] && <div className="source-results">{sourceResults[track.id].tracks.length ? sourceResults[track.id].tracks.map(result => { const chosen = result.url === (sourceUrls[track.id] ?? track.sourceUrl); return <button key={result.url} className={chosen ? "selected" : ""} aria-pressed={chosen} onClick={() => setSourceUrls(values => ({...values,[track.id]:result.url}))}><span>{result.displayText}</span><small>{chosen ? <><Check size={13}/> Selected</> : "Use this track page"}</small></button>; }) : <p>No source candidates found. Try a manual URL or skip this seed.</p>}</div>}<input aria-label="1001Tracklists track URL" value={sourceUrls[track.id] ?? track.sourceUrl ?? ""} onChange={e => setSourceUrls(values => ({...values,[track.id]:e.target.value}))} placeholder="https://www.1001tracklists.com/track/…"/><div className="review-actions"><button className="primary compact" onClick={() => resolution.mutate({id:track.id,status:"accepted",url:sourceUrls[track.id] ?? track.sourceUrl})} disabled={resolution.isPending}><Check size={15}/> Confirm URL</button><button onClick={() => resolution.mutate({id:track.id,status:"skipped"})} disabled={resolution.isPending}>Skip seed</button>{track.matchStatus && track.matchStatus !== "pending" && <button onClick={() => resolution.mutate({id:track.id,status:"pending"})}>Review again</button>}{track.sourceUrl && <a href={track.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink size={13}/></a>}</div></div>}
+        {reviewing === track.id && track.selected && <div className="match-review">
+          <div><b>Confirm this exact recording</b><p>Search the source or paste its track page. Nothing is accepted automatically; confirm the recording and version yourself.</p></div>
+          <div className="source-search-actions"><button className="source-search-button" onClick={() => lookup.mutate({track})} disabled={lookup.isPending || verification.isPending}>{lookup.isPending ? "Searching installed Chrome…" : "Search 1001Tracklists"}</button>{track.version && <button onClick={() => lookup.mutate({track,broad:true})} disabled={lookup.isPending || verification.isPending}>Search without version</button>}</div>
+          {sourceResults[track.id] && <div className="source-results">{sourceResults[track.id].tracks.length ? sourceResults[track.id].tracks.map(result => { const chosen = result.url === (sourceUrls[track.id] ?? track.sourceUrl); return <button key={result.url} className={chosen ? "selected" : ""} aria-pressed={chosen} onClick={() => setSourceUrls(values => ({...values,[track.id]:result.url}))}><span>{result.displayText}</span><small>{chosen ? <><Check size={13}/> Selected</> : "Use this track page"}</small></button>; }) : <p>No source candidates found. Try a manual URL or skip this seed.</p>}</div>}
+          <input aria-label="1001Tracklists track URL" value={sourceUrls[track.id] ?? track.sourceUrl ?? ""} onChange={e => setSourceUrls(values => ({...values,[track.id]:e.target.value}))} placeholder="https://www.1001tracklists.com/track/…"/>
+          {verifiedTracks[track.id] && <div className="access-verified"><Check size={16}/><span><b>Source access verified</b><small>{verifiedTracks[track.id].title} · {verifiedTracks[track.id].appearances.length} appearance{verifiedTracks[track.id].appearances.length === 1 ? "" : "s"} found on this page</small></span></div>}
+          {verification.isPending && <div className="browser-wait"><span className="status-dot"/><span><b>Waiting for the dedicated Chrome window</b><small>If 1001Tracklists asks for attention, complete it there. Hekt will resume automatically.</small></span></div>}
+          <div className="review-actions">
+            <button className="primary compact" onClick={() => resolution.mutate({id:track.id,status:"accepted",url:sourceUrls[track.id] ?? track.sourceUrl})} disabled={resolution.isPending || verification.isPending}><Check size={15}/> Confirm URL</button>
+            <button onClick={() => { const url = sourceUrls[track.id] ?? track.sourceUrl; if (url) verification.mutate({id:track.id,url}); }} disabled={verification.isPending || !(sourceUrls[track.id] ?? track.sourceUrl)}>{verification.isPending ? "Waiting for Chrome…" : "Open browser & verify access"}</button>
+            <button onClick={() => resolution.mutate({id:track.id,status:"skipped"})} disabled={resolution.isPending || verification.isPending}>Skip seed</button>
+            {track.matchStatus && track.matchStatus !== "pending" && <button onClick={() => resolution.mutate({id:track.id,status:"pending"})}>Review again</button>}
+            {track.sourceUrl && <a href={track.sourceUrl} target="_blank" rel="noreferrer">Open source <ExternalLink size={13}/></a>}
+          </div>
+        </div>}
       </Fragment>)}</div>
       : <Empty title="Your library is empty" body="Import a Rekordbox TXT export to start reviewing tracks." icon={<ListMusic/>} action="Import playlist" onAction={onImport}/>}</div>
   </section>;

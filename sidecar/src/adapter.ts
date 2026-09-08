@@ -42,7 +42,7 @@ export class SourceAdapter {
     }
     if (request.operation === "fetchTrack") {
       const payload = FetchTrackPayload.parse(request.payload);
-      return this.fetchTrack(payload.url, request.timeoutMs);
+      return this.fetchTrack(payload, request.timeoutMs);
     }
     throw new AdapterError("OPERATION_NOT_IMPLEMENTED", `${request.operation} is not enabled in the Phase 0 spike.`);
   }
@@ -96,15 +96,26 @@ export class SourceAdapter {
     return { query, resultUrl: page.url(), tracks };
   }
 
-  private async fetchTrack(input: string, timeoutMs: number) {
-    const url = validateSourceTrackUrl(input);
+  private async fetchTrack(
+    payload: {url:string;interactive:boolean;challengeTimeoutMs:number},
+    timeoutMs: number,
+  ) {
+    const url = validateSourceTrackUrl(payload.url);
     const page = await this.browserPage();
     page.setDefaultTimeout(timeoutMs);
     const response = await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     if (!response || ![200, 206].includes(response.status())) {
       throw new AdapterError("SOURCE_HTTP_ERROR", `1001Tracklists returned HTTP ${response?.status() ?? "unknown"}.`, true);
     }
+    if (await this.hasChallenge(page)) {
+      if (!payload.interactive) {
+        throw new AdapterError("BROWSER_CHALLENGE", "1001Tracklists needs attention in the dedicated Chrome profile.");
+      }
+      await this.waitForChallenge(page, payload.challengeTimeoutMs);
+      await page.waitForLoadState("domcontentloaded", { timeout: Math.min(timeoutMs, 30_000) });
+    }
     await this.assertUsable(page);
+    validateSourceTrackUrl(page.url());
     const title = ((await page.locator("h1").first().textContent().catch(() => null)) || await page.title()).trim();
     const appearances: Array<{url:string;label:string}> = [];
     const seen = new Set<string>();
@@ -120,11 +131,29 @@ export class SourceAdapter {
     return { url: page.url(), title, appearances };
   }
 
-  private async assertUsable(page: Page): Promise<void> {
-    const title = (await page.title()).toLowerCase();
-    const body = (await page.locator("body").innerText()).slice(0, 2500).toLowerCase();
+  private async waitForChallenge(page: Page, timeoutMs: number): Promise<void> {
+    await page.bringToFront();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (page.isClosed()) {
+        throw new AdapterError("BROWSER_SESSION_CLOSED", "The dedicated Chrome window was closed before source access was verified.", true);
+      }
+      if (!await this.hasChallenge(page)) return;
+      await page.waitForTimeout(1_000);
+    }
+    throw new AdapterError("BROWSER_CHALLENGE_TIMEOUT", "Source access is still waiting for attention in the dedicated Chrome window.", true);
+  }
+
+  private async hasChallenge(page: Page): Promise<boolean> {
+    const title = (await page.title().catch(() => "")).toLowerCase();
+    const body = (await page.locator("body").innerText().catch(() => "")).slice(0, 2500).toLowerCase();
     const challengeMarkers = ["just a moment", "captcha", "access denied", "please wait, you will be forwarded", "turnstile"];
-    if (challengeMarkers.some(marker => title.includes(marker) || body.includes(marker)) || await page.locator("#turnstile-container").count() > 0) {
+    return challengeMarkers.some(marker => title.includes(marker) || body.includes(marker))
+      || await page.locator("#turnstile-container").count().catch(() => 0) > 0;
+  }
+
+  private async assertUsable(page: Page): Promise<void> {
+    if (await this.hasChallenge(page)) {
       throw new AdapterError("BROWSER_CHALLENGE", "1001Tracklists needs attention in the dedicated Chrome profile.");
     }
     const url = new URL(page.url());

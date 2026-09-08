@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ImportPreview, LibrarySummary, SourceSearchResult, Track } from "./types";
+import type { ImportPreview, LibrarySummary, SourceSearchResult, SourceTrackDetail, Track } from "./types";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -37,4 +37,9 @@ export async function resolveSeed(trackId: number, status: "pending" | "accepted
 export async function searchSource(track: Track, broad = false): Promise<SourceSearchResult> {
   if (!isTauri()) return { query: `${track.artist} ${track.title}`, resultUrl: "", tracks: [] };
   return invoke("search_source", { input: { artist: track.artist, title: track.title, version: broad ? undefined : track.version, limit: 10 } });
+}
+
+export async function verifySourceTrack(url: string): Promise<SourceTrackDetail> {
+  if (!isTauri()) return { url, title: "Demo source track", appearances: [] };
+  return invoke("verify_source_track", { url });
 }

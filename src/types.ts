@@ -44,3 +44,9 @@ export type SourceSearchResult = {
   resultUrl: string;
   tracks: SourceTrackResult[];
 };
+
+export type SourceTrackDetail = {
+  url: string;
+  title: string;
+  appearances: Array<{url: string; label: string}>;
+};

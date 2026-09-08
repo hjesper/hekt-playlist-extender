@@ -22,6 +22,7 @@ The current milestone implements the import and seed-review foundation plus a bo
 - a versioned, bounded JSON Lines protocol and installed-Chrome Playwright sidecar
 - conservative track search and validated detail-page navigation
 - explicit `BROWSER_CHALLENGE` responses for challenge/forwarding pages
+- a visible Chrome handoff that waits for normal user interaction and resumes track-page extraction in the same persistent profile
 
 Playlist data stays local. The live source experiment sends only selected artist/title/version search terms to 1001Tracklists. Crawling, YouTube playback, recommendation actions, and CSV export remain intentionally disabled until the Phase 0 access, packaging, and playback gate passes. See [the current spike findings](docs/phase-0-spike.md).
 

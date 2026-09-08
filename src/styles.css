@@ -73,6 +73,12 @@ main header { height: 74px; border-bottom: 1px solid #292a25; display: flex; ali
 .review-actions button, .preview-heading button, .success button { border: 1px solid #4b4e45; background: transparent; color: #d7d9d1; border-radius: 7px; padding: 8px 11px; cursor: pointer; }
 .review-actions .primary { background: #a9ff35; color: #13160e; border-color: #a9ff35; }
 .review-actions a { display: flex; gap: 5px; align-items: center; color: #a9ff35; text-decoration: none; font-size: 11px; margin-left: auto; }
+.browser-wait, .access-verified { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border-radius: 8px; background: #252821; color: #d9ddd3; }
+.browser-wait .status-dot { margin-top: 5px; flex: 0 0 auto; animation: pulse 1.4s ease-in-out infinite; }
+.browser-wait span:last-child, .access-verified span { display: flex; flex-direction: column; gap: 3px; }
+.browser-wait small, .access-verified small { color: #92978b; }
+.access-verified { background: #22301c; color: #caff90; }
+@keyframes pulse { 50% { opacity: .35; } }
 .dropzone { width: 100%; margin-top: 35px; min-height: 260px; border: 1px dashed #50544a; border-radius: 12px; background: #191b17; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; }
 .dropzone > span, .empty > span { width: 49px; height: 49px; display: grid; place-items: center; border: 1px solid #41453b; border-radius: 12px; color: #a9ff35; }
 .dropzone h2 { margin: 17px 0 4px; font-size: 17px; }
