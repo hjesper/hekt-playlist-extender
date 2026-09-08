@@ -1,0 +1,4 @@
+#	Artist	Track Title	Remixer	BPM	Key	Label	Time
+1	Bicep	Glue	Original Mix	129.0	Am	Ninja Tune	4:29
+2	Overmono	So U Kno		130.0	Fm	XL Recordings	5:43
+3	Björk	Jóga	String and Vocal Mix	122,5	Cm	One Little Independent	4:25

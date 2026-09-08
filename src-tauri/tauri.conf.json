@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Hekt Playlist Extender",
+  "version": "0.1.0",
+  "identifier": "com.hekt.playlist-extender",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build:tauri",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Hekt Playlist Extender", "width": 1280, "height": 820, "minWidth": 900, "minHeight": 650 }],
+    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost" }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Music",
+    "shortDescription": "Find tracks through DJ-set evidence",
+    "externalBin": ["binaries/hekt-source-adapter"]
+  }
+}

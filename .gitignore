@@ -1,0 +1,14 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.DS_Store
