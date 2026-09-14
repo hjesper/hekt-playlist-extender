@@ -48,3 +48,7 @@ Do not start the crawler or recommendation phases yet. Search coverage and sidec
 The visible-browser challenge pause/resume increment is now implemented: match review can open a track page in the dedicated Chrome profile, wait for normal user interaction for up to three minutes, and resume extraction automatically. It still needs a live verification against the observed Turnstile page. If detail pages remain inaccessible after normal user interaction, reassess user-supplied evidence URLs or the 1001Tracklists integration itself before investing in durable crawling.
 
 Phase 2 queue groundwork has started without crossing that gate: the app can persist a bounded run and one idempotent appearance job per unique confirmed source track, with pause, resume, and cancel state transitions. Preparing this queue performs no source requests; live job execution remains disabled until access is verified.
+
+## Subsequent implementation note
+
+On 2026-09-09, the remaining workflow was implemented behind the same explicit challenge boundary: bounded extraction, cache/recovery behavior, ranking/evidence, feedback, manual playback-source attachment, and CSV export. This does not retroactively pass the Phase 0 gate. The live challenged path, production playback, recommendation usefulness, and a new packaged end-to-end smoke test remain to be verified; see [the current plan status](plan-status.md).

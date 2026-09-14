@@ -1,21 +1,23 @@
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Check, ChevronRight, Disc3, Download, ExternalLink, Headphones, Library, ListMusic, Music2, Pause, Play, Search, Settings, Sparkles, Upload, X } from "lucide-react";
-import { controlDiscovery, getLatestDiscoveryRun, getSummary, importPlaylist, loadTracks, previewPlaylist, resolveSeed, searchSource, setSeed, startDiscovery, verifySourceTrack } from "./api";
-import type { DiscoveryRun, ImportPreview, LibrarySummary, SourceSearchResult, SourceTrackDetail, Track } from "./types";
+import { AlertTriangle, Check, ChevronRight, Disc3, Download, ExternalLink, Headphones, Heart, Library, ListMusic, Music2, Pause, Play, RotateCcw, Search, Settings, Sparkles, Upload, X } from "lucide-react";
+import { attachAudioSource, controlDiscovery, executeDiscovery, exportShortlist, getLatestDiscoveryRun, getSummary, importPlaylist, listRecommendations, loadTracks, markAudioSourceWrongVersion, openDiscoveryBrowser, previewPlaylist, resolveSeed, searchSource, setRecommendationFeedback, setSeed, startDiscovery, verifySourceTrack } from "./api";
+import type { DiscoveryRun, ImportPreview, LibrarySummary, Recommendation, SourceSearchResult, SourceTrackDetail, Track } from "./types";
 
-type Page = "library" | "import" | "discover" | "settings";
+type Page = "library" | "import" | "discover" | "results" | "settings";
 const nav = [
   { id: "import" as const, label: "Import & match", icon: Upload },
   { id: "library" as const, label: "Library", icon: Library },
   { id: "discover" as const, label: "Discover", icon: Sparkles },
+  { id: "results" as const, label: "Results", icon: Headphones },
   { id: "settings" as const, label: "Settings", icon: Settings },
 ];
 
 export function App() {
   const [page, setPage] = useState<Page>("library");
   const [search, setSearch] = useState("");
+  const [playing,setPlaying]=useState<Recommendation>();
   const summary = useQuery({ queryKey: ["summary"], queryFn: getSummary });
   const tracks = useQuery({ queryKey: ["tracks"], queryFn: loadTracks });
 
@@ -34,9 +36,10 @@ export function App() {
       {page === "discover" && (
         <DiscoverPage summary={summary.data} onReview={() => setPage("library")}/>
       )}
+      {page === "results" && <ResultsPage onPlay={setPlaying}/>}
       {page === "settings" && <SettingsPage/>}
     </main>
-    <Player/>
+    <Player recommendation={playing} onExport={exportShortlist}/>
   </div>;
 }
 
@@ -96,38 +99,112 @@ function ImportPage({onComplete}:{onComplete:()=>void}) {
 
 function DiscoverPage({summary,onReview}:{summary?:LibrarySummary;onReview:()=>void}) {
   const client = useQueryClient();
-  const run = useQuery({queryKey:["discovery-run"],queryFn:getLatestDiscoveryRun});
+  const run = useQuery({
+    queryKey: ["discovery-run"],
+    queryFn: getLatestDiscoveryRun,
+    refetchInterval: query => query.state.data?.status === "running" ? 1_000 : false,
+  });
   const start = useMutation({mutationFn:startDiscovery,onSuccess:data => client.setQueryData(["discovery-run"],data)});
   const control = useMutation({mutationFn:({runId,action}:{runId:number;action:"pause"|"resume"|"cancel"}) => controlDiscovery(runId,action),onSuccess:data => client.setQueryData(["discovery-run"],data)});
-  const error = run.error ?? start.error ?? control.error;
+  const execute = useMutation({
+    mutationFn: executeDiscovery,
+    onMutate: runId => client.setQueryData<DiscoveryRun | null>(["discovery-run"], current => current?.id === runId ? {...current,status:"running"} : current),
+    onSuccess: data => {
+      client.setQueryData(["discovery-run"],data);
+      client.invalidateQueries({queryKey:["recommendations"]});
+    },
+    onError: () => client.invalidateQueries({queryKey:["discovery-run"]}),
+  });
+  const browser = useMutation({
+    mutationFn: openDiscoveryBrowser,
+    onSuccess: data => client.setQueryData(["discovery-run"], data),
+    onError: () => client.invalidateQueries({queryKey:["discovery-run"]}),
+  });
+  const error = run.error ?? start.error ?? control.error ?? execute.error ?? browser.error;
   const canStart = !run.data || ["cancelled","completed","completed_with_errors","failed"].includes(run.data.status);
   if (!summary?.selectedSeeds) return <section className="page"><Empty title="Discovery is ready for seeds" body="Import a playlist and select tracks before starting an evidence-backed discovery run." icon={<Sparkles/>} action="Review seed tracks" onAction={onReview}/></section>;
   if (summary.pendingSeeds) return <section className="page"><Empty title={`${summary.pendingSeeds} seed match${summary.pendingSeeds === 1 ? "" : "es"} need review`} body="Every selected seed must be confirmed or explicitly skipped before discovery can start." icon={<AlertTriangle/>} action="Finish match review" onAction={onReview}/></section>;
   if (!summary.acceptedSeeds) return <section className="page"><Empty title="No confirmed seeds yet" body="Every selected track was skipped. Confirm at least one exact recording before starting discovery." icon={<AlertTriangle/>} action="Review seed tracks" onAction={onReview}/></section>;
   if (run.isLoading) return <section className="page"><Empty title="Loading discovery" body="Reading persisted run state from the local library." icon={<Sparkles/>} action="Review seed tracks" onAction={onReview}/></section>;
   return <section className="page">
-    <div className="page-title"><div><p className="eyebrow">BOUNDED DISCOVERY</p><h1>Discover</h1><p>Prepare a durable, resumable source queue from your confirmed seeds.</p></div>{canStart && <button className="primary" onClick={() => start.mutate()} disabled={start.isPending}><Play size={17}/>{start.isPending ? "Preparing…" : run.data ? "Prepare another run" : "Prepare discovery run"}</button>}</div>
+    <div className="page-title"><div><p className="eyebrow">BOUNDED DISCOVERY</p><h1>Discover</h1><p>Prepare a durable, resumable source queue from your confirmed seeds.</p></div>{canStart && <div className="page-actions"><button className="primary" onClick={() => start.mutate(false)} disabled={start.isPending}><Play size={17}/>{start.isPending ? "Preparing…" : run.data ? "Prepare another run" : "Prepare discovery run"}</button>{run.data && <button onClick={() => start.mutate(true)} disabled={start.isPending}>Prepare fresh source run</button>}</div>}</div>
     {error && <div className="error"><X size={18}/>{String(error)}</div>}
-    {!run.data ? <div className="discovery-ready panel"><div><span className="pill">Phase 2 foundation</span><h2>{summary.acceptedSeeds} confirmed seed{summary.acceptedSeeds === 1 ? "" : "s"} ready</h2><p>The run will create one durable appearance job per seed in playlist order. This records bounded settings and makes future retries idempotent.</p></div><div className="budget-grid"><Budget value="25" label="appearances per seed"/><Budget value="100" label="unique tracklists"/><Budget value="1" label="active page"/></div><div className="warning"><AlertTriangle size={17}/><span>Live execution remains gated until the visible-browser access check passes. Preparing the queue makes no source requests.</span></div></div>
+    {!run.data ? <div className="discovery-ready panel"><div><span className="pill">Ready to discover</span><h2>{summary.acceptedSeeds} confirmed seed{summary.acceptedSeeds === 1 ? "" : "s"} ready</h2><p>The durable queue resumes safely, retains partial results, and ranks every identified candidate after bounded extraction.</p></div><div className="budget-grid"><Budget value="25" label="appearances per seed"/><Budget value="100" label="unique tracklists"/><Budget value="1" label="active page"/></div><div className="warning"><AlertTriangle size={17}/><span>If the source presents a challenge, Hekt pauses for normal interaction in its dedicated Chrome profile. It never solves challenges automatically.</span></div></div>
     : <DiscoveryRunCard
         run={run.data}
         busy={control.isPending}
         onControl={action => control.mutate({runId:run.data!.id,action})}
+        onExecute={()=>execute.mutate(run.data!.id)} executing={execute.isPending}
+        onOpenBrowser={()=>browser.mutate(run.data!.id)} openingBrowser={browser.isPending}
       />}
   </section>;
 }
 
-function DiscoveryRunCard({run,busy,onControl}:{run:DiscoveryRun;busy:boolean;onControl:(action:"pause"|"resume"|"cancel")=>void}) {
+function DiscoveryRunCard({run,busy,onControl,onExecute,executing,onOpenBrowser,openingBrowser}:{run:DiscoveryRun;busy:boolean;onControl:(action:"pause"|"resume"|"cancel")=>void;onExecute:()=>void;executing:boolean;onOpenBrowser:()=>void;openingBrowser:boolean}) {
   const finished = run.completedJobs + run.failedJobs;
   const progress = run.totalJobs ? Math.round((finished / run.totalJobs) * 100) : 0;
-  return <div className="run-card panel"><div className="run-heading"><div><span className={`run-status ${run.status}`}>{run.status.replaceAll("_"," ")}</span><h2>Discovery run #{run.id}</h2><p>{run.message}</p></div><div className="run-actions">{["queued","running","waiting_for_browser"].includes(run.status) && <button onClick={() => onControl("pause")} disabled={busy}><Pause size={15}/>Pause</button>}{["paused","waiting_for_browser"].includes(run.status) && <button className="primary compact" onClick={() => onControl("resume")} disabled={busy}><Play size={15}/>Resume</button>}{!["cancelled","completed","completed_with_errors","failed"].includes(run.status) && <button onClick={() => onControl("cancel")} disabled={busy}>Cancel</button>}</div></div><div className="progress-track"><span style={{width:`${progress}%`}}/></div><div className="run-stats"><Budget value={run.totalJobs} label="seed jobs"/><Budget value={run.queuedJobs} label="queued"/><Budget value={run.completedJobs} label="completed"/><Budget value={run.failedJobs} label="failed"/></div><div className="run-meta"><span>Stage <b>{run.stage.replaceAll("_"," ")}</b></span><span>Bounds <b>{run.maxAppearancesPerSeed} appearances · {run.maxTracklists} tracklists</b></span><span>Policy <b>round-robin seeds</b></span></div></div>;
+  const canExecute = ["queued","paused","waiting_for_browser"].includes(run.status);
+  const active = ["queued","running","waiting_for_browser","paused"].includes(run.status);
+  const waitingForBrowser = run.status === "waiting_for_browser";
+  return <div className="run-card panel"><div className="run-heading"><div><span className={`run-status ${run.status}`}>{run.status.replaceAll("_"," ")}</span><h2>Discovery run #{run.id}</h2><p>{run.message}</p></div><div className="run-actions">{waitingForBrowser&&<button className="primary compact" onClick={onOpenBrowser} disabled={openingBrowser||executing}>{openingBrowser?<><span className="status-dot"/>Waiting for Chrome…</>:<><ExternalLink size={15}/>Open Chrome once</>}</button>}{canExecute&&<button className={waitingForBrowser?"":"primary compact"} onClick={onExecute} disabled={executing||openingBrowser}>{executing?<><span className="status-dot"/>Working headlessly…</>:<><Play size={15}/>{waitingForBrowser?"Retry headlessly":run.status === "queued"?"Run headlessly":"Resume headlessly"}</>}</button>}{["queued","running","waiting_for_browser"].includes(run.status)&&<button onClick={() => onControl("pause")} disabled={busy}><Pause size={15}/>Pause</button>}{active&&<button onClick={() => onControl("cancel")} disabled={busy}>Cancel</button>}</div></div><div className="progress-track"><span style={{width:`${progress}%`}}/></div><div className="run-stats"><Budget value={run.totalJobs} label="durable jobs"/><Budget value={run.queuedJobs} label="queued"/><Budget value={run.completedJobs} label="completed"/><Budget value={run.failedJobs} label="failed"/></div><div className="run-meta"><span>Stage <b>{run.stage.replaceAll("_"," ")}</b></span><span>Bounds <b>{run.maxAppearancesPerSeed} appearances · {run.maxTracklists} tracklists</b></span><span>Browser <b>headless unless explicitly opened</b></span><span>Policy <b>round-robin seeds</b></span></div></div>;
+}
+
+function audioProvider(url: string): "youtube" | "bandcamp" | "soundcloud" {
+  const host = new URL(url).hostname.toLowerCase();
+  if (["youtube.com","www.youtube.com","m.youtube.com","youtu.be"].includes(host)) return "youtube";
+  if (host === "soundcloud.com" || host.endsWith(".soundcloud.com")) return "soundcloud";
+  if (host === "bandcamp.com" || host.endsWith(".bandcamp.com")) return "bandcamp";
+  throw new Error("Use a YouTube, Bandcamp, or SoundCloud HTTPS URL.");
+}
+
+function ResultsPage({onPlay}:{onPlay:(item:Recommendation)=>void}) {
+  const client = useQueryClient();
+  const results = useQuery({queryKey:["recommendations"],queryFn:listRecommendations});
+  const [openId,setOpenId] = useState<number>();
+  const [audio,setAudio] = useState<Record<number,string>>({});
+  const feedback = useMutation({mutationFn:({id,value}:{id:number;value?:"saved"|"rejected"|"dismissed"})=>setRecommendationFeedback(id,value),onSuccess:()=>client.invalidateQueries({queryKey:["recommendations"]})});
+  const attach = useMutation({mutationFn:({id,url}:{id:number;url:string})=>attachAudioSource(id,audioProvider(url),url),onSuccess:(_,variables)=>{setAudio(values=>({...values,[variables.id]:""}));client.invalidateQueries({queryKey:["recommendations"]});}});
+  const wrongVersion = useMutation({mutationFn:markAudioSourceWrongVersion,onSuccess:()=>client.invalidateQueries({queryKey:["recommendations"]})});
+  const exportCsv = useMutation({mutationFn:exportShortlist});
+  const error = results.error ?? feedback.error ?? attach.error ?? wrongVersion.error ?? exportCsv.error;
+  const active = results.data?.filter(item => !["rejected","dismissed"].includes(item.disposition ?? "")) ?? [];
+  const removed = results.data?.filter(item => ["rejected","dismissed"].includes(item.disposition ?? "")) ?? [];
+  return <section className="page"><div className="page-title"><div><p className="eyebrow">EVIDENCE-BACKED SHORTLIST</p><h1>Recommendations</h1><p>Ranked deterministically from the fetched sets. Save, reject, inspect evidence, and attach the exact recording.</p></div><button className="primary" onClick={()=>exportCsv.mutate()} disabled={exportCsv.isPending}><Download size={17}/>{exportCsv.isPending ? "Exporting…" : "Export saved CSV"}</button></div>
+    {error&&<div className="error"><X size={18}/>{String(error)}</div>}
+    <div className="result-list">{active.map((item,index)=><RecommendationCard key={item.id} item={item} rank={index+1} expanded={openId===item.id} audioUrl={audio[item.id]??""} busy={feedback.isPending||attach.isPending||wrongVersion.isPending} onToggle={()=>setOpenId(openId===item.id?undefined:item.id)} onAudioChange={url=>setAudio(values=>({...values,[item.id]:url}))} onAttach={()=>attach.mutate({id:item.sourceTrackId,url:audio[item.id]??""})} onPlay={()=>onPlay(item)} onFeedback={value=>feedback.mutate({id:item.sourceTrackId,value})} onWrongVersion={()=>wrongVersion.mutate(item.sourceTrackId)}/>)}</div>
+    {!results.isLoading&&!results.data?.length&&<Empty title="No ranked candidates yet" body="Complete a discovery run first. Partial source failures remain visible on the run while usable evidence is retained." icon={<Sparkles/>} action="Refresh results" onAction={()=>results.refetch()}/>}
+    {removed.length>0&&<details className="removed-results"><summary>{removed.length} rejected or globally dismissed track{removed.length===1?"":"s"}</summary><div>{removed.map(item=><div key={item.id}><span><b>{item.title}</b><small>{item.artist} · {item.disposition === "dismissed" ? "Dismissed globally" : "Rejected for this playlist"}</small></span><button onClick={()=>feedback.mutate({id:item.sourceTrackId})}><RotateCcw size={14}/>Undo</button></div>)}</div></details>}
+  </section>;
+}
+
+function RecommendationCard({item,rank,expanded,audioUrl,busy,onToggle,onAudioChange,onAttach,onPlay,onFeedback,onWrongVersion}:{item:Recommendation;rank:number;expanded:boolean;audioUrl:string;busy:boolean;onToggle:()=>void;onAudioChange:(url:string)=>void;onAttach:()=>void;onPlay:()=>void;onFeedback:(value?:"saved"|"rejected"|"dismissed")=>void;onWrongVersion:()=>void}) {
+  return <article className="result-card panel"><span className="result-rank">{String(rank).padStart(2,"0")}</span><div className="result-main"><h2>{item.title}{item.version&&<small> · {item.version}</small>}</h2><p>{item.artist}</p><div className="evidence-summary">Found in <b>{item.setCount}</b> fetched set{item.setCount===1?"":"s"} containing <b>{item.seedCount}</b> seed{item.seedCount===1?"":"s"}; <b>{item.djCount}</b> identified DJ{item.djCount===1?"":"s"}; adjacent in <b>{item.adjacentCount}</b> set{item.adjacentCount===1?"":"s"}.</div><button className="evidence-toggle" onClick={onToggle}>Evidence & source {expanded?"−":"+"}</button>{expanded&&<div className="evidence-drawer">{item.evidenceUrls.map(url=><a key={url} href={url} target="_blank" rel="noreferrer">Open supporting set <ExternalLink size={12}/></a>)}<div className="attach-row"><input value={audioUrl} onChange={event=>onAudioChange(event.target.value)} placeholder="Exact YouTube, Bandcamp, or SoundCloud URL"/><button onClick={onAttach} disabled={!audioUrl||busy}>{item.sourceUrl?"Replace source":"Attach source"}</button></div>{item.sourceUrl&&<div className="source-controls"><span>{item.sourceProvider} · checked {item.playbackStatus ?? "unknown"}</span><button onClick={onWrongVersion} disabled={busy}>Wrong version</button></div>}<button className="dismiss-link" onClick={()=>onFeedback("dismissed")} disabled={busy}>Dismiss this recording globally</button></div>}</div><strong className="score">{item.score.toFixed(1)}<small>score</small></strong><div className="result-actions"><button onClick={onPlay} disabled={!item.sourceUrl}><Play size={15}/>Audition</button><button className={item.disposition==="saved"?"saved":""} onClick={()=>onFeedback(item.disposition==="saved"?undefined:"saved")} disabled={busy}><Heart size={15}/>{item.disposition==="saved"?"Saved":"Save"}</button><button onClick={()=>onFeedback("rejected")} disabled={busy}><X size={15}/>Reject</button></div></article>;
 }
 
 function Budget({value,label}:{value:string|number;label:string}){return <div className="budget"><strong>{value}</strong><span>{label}</span></div>}
 
-function SettingsPage(){ return <section className="page narrow"><p className="eyebrow">CONFIGURATION</p><h1>Settings</h1><div className="panel settings"><h2>Source connections</h2><Setting title="1001Tracklists adapter" text="Not configured — live access must pass the Phase 0 spike."/><Setting title="YouTube Data API" text="No key stored. Credentials will be kept in the macOS keychain."/><Setting title="Browser session" text="Installed Chrome · dedicated profile"/></div></section> }
-function Setting({title,text}:{title:string;text:string}){return <div className="setting"><div><b>{title}</b><p>{text}</p></div><button disabled>Not available yet</button></div>}
+function SettingsPage(){ return <section className="page narrow"><p className="eyebrow">CONFIGURATION</p><h1>Settings</h1><div className="panel settings"><h2>Source connections</h2><Setting title="1001Tracklists adapter" text="Implemented · live challenged extraction still needs verification."/><Setting title="Audio sources" text="Attach verified YouTube, Bandcamp, or SoundCloud URLs per recommendation."/><Setting title="Browser session" text="Installed Chrome · dedicated persistent profile"/></div></section> }
+function Setting({title,text}:{title:string;text:string}){return <div className="setting"><div><b>{title}</b><p>{text}</p></div></div>}
 function Stat({value,label,muted}:{value:string|number;label:string;muted?:boolean}){return <div className={`stat ${muted?"muted":""}`}><strong>{value}</strong><span>{label}</span></div>}
 function Info({n,title,text}:{n:string;title:string;text:string}){return <div className="info"><span>{n}</span><h3>{title}</h3><p>{text}</p></div>}
 function Empty({title,body,icon,action,onAction}:{title:string;body:string;icon:React.ReactNode;action:string;onAction:()=>void}){return <div className="empty"><span>{icon}</span><h2>{title}</h2><p>{body}</p><button onClick={onAction}>{action}</button></div>}
-function Player(){return <footer className="player"><div className="cover"><Music2/></div><div><b>Nothing playing</b><small>Select a recommendation to audition</small></div><div className="player-line"/><button disabled><Headphones size={18}/>Player</button><button disabled><Download size={18}/>Export</button></footer>}
+function youtubeEmbedUrl(sourceUrl?: string): string | undefined {
+  if (!sourceUrl) return;
+  try {
+    const url = new URL(sourceUrl);
+    let videoId: string | null | undefined;
+    if (url.hostname === "youtu.be") videoId = url.pathname.split("/").filter(Boolean)[0];
+    if (["youtube.com","www.youtube.com","m.youtube.com"].includes(url.hostname)) {
+      videoId = url.searchParams.get("v") ?? (url.pathname.startsWith("/shorts/") ? url.pathname.split("/")[2] : undefined);
+    }
+    if (!videoId || !/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return;
+    return `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1`;
+  } catch {
+    return;
+  }
+}
+
+function Player({recommendation,onExport}:{recommendation?:Recommendation;onExport:()=>void}) {
+  const embedUrl = recommendation?.sourceProvider === "youtube" ? youtubeEmbedUrl(recommendation.sourceUrl) : undefined;
+  return <footer className="player"><div className="cover"><Music2/></div><div><b>{recommendation?.title??"Nothing playing"}</b><small>{recommendation?recommendation.artist:"Select a recommendation to audition"}</small></div>{embedUrl?<iframe title="Persistent YouTube audition player" src={embedUrl} allow="autoplay; encrypted-media" referrerPolicy="strict-origin-when-cross-origin"/>:<div className="player-line"/>}<a className={!recommendation?.sourceUrl?"disabled":""} href={recommendation?.sourceUrl} target="_blank" rel="noreferrer"><Headphones size={18}/>{embedUrl?"Open externally":recommendation?.sourceUrl?`Open ${recommendation.sourceProvider}`:"Open externally"}</a><button onClick={onExport}><Download size={18}/>Export</button></footer>;
+}

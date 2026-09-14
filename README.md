@@ -13,7 +13,7 @@ pnpm build
 pnpm tauri dev
 ```
 
-The current milestone implements the import and seed-review foundation plus a bounded Phase 0 source adapter:
+The current milestone implements the end-to-end local workflow in code:
 
 - UTF-8/UTF-16 Rekordbox TXT, TSV, and CSV parsing with an import preview
 - a migration-backed local SQLite library using WAL and foreign keys
@@ -22,10 +22,16 @@ The current milestone implements the import and seed-review foundation plus a bo
 - a versioned, bounded JSON Lines protocol and installed-Chrome Playwright sidecar
 - conservative track search and validated detail-page navigation
 - explicit `BROWSER_CHALLENGE` responses for challenge/forwarding pages
-- a visible Chrome handoff that waits for normal user interaction and resumes track-page extraction in the same persistent profile
+- headless discovery by default, with a visible Chrome handoff only when the user explicitly opens a blocked challenge page
 - persisted bounded discovery runs with one idempotent appearance job per unique confirmed source track, plus pause, resume, and cancel lifecycle controls
+- cache-aware appearance and tracklist extraction with persisted partial results and actionable challenge states
+- bounded round-robin set selection, restart recovery, and pause/cancel checkpoints between source items
+- deterministic co-occurrence ranking, conservative playlist-wide exclusions, inspectable set evidence, and stable tie-breaking
+- global saves and dismissals, per-playlist reject/undo feedback, validated manual playback sources, a persistent YouTube player, and UTF-8 shortlist CSV export
 
-Playlist data stays local. The live source experiment sends only selected artist/title/version search terms to 1001Tracklists. Crawling, YouTube playback, recommendation actions, and CSV export remain intentionally disabled until the Phase 0 access, packaging, and playback gate passes. See [the current spike findings](docs/phase-0-spike.md).
+Playlist data, feedback, and cached evidence stay local. Source requests send only selected identity terms and URLs to 1001Tracklists. Browser challenges require normal user interaction and are never solved automatically. Playback uses URLs the user verifies and attaches; discovery does not spend YouTube API quota or block on audio resolution.
+
+This is not yet a release-complete implementation of every item in `PLAN.md`. Live appearance/tracklist extraction after a normal challenge handoff, production WebView playback, recommendation usefulness, and the packaged import-to-export smoke test still require hands-on verification. Automatic strong-match acceptance, editable import column mapping, and YouTube API search/quota handling also remain outside the implemented path. See [the plan status](docs/plan-status.md), [ranking specification](docs/ranking.md), and [original spike findings](docs/phase-0-spike.md).
 
 To repeat the bounded search-coverage experiment with installed Chrome:
 

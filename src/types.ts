@@ -66,3 +66,21 @@ export type DiscoveryRun = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type Recommendation = {
+  id: number;
+  sourceTrackId: number;
+  artist: string;
+  title: string;
+  version?: string;
+  score: number;
+  setCount: number;
+  seedCount: number;
+  djCount: number;
+  adjacentCount: number;
+  disposition?: "saved" | "rejected" | "dismissed";
+  sourceUrl?: string;
+  sourceProvider?: "youtube" | "bandcamp" | "soundcloud";
+  playbackStatus?: "available" | "unavailable" | "wrong_version" | "unknown";
+  evidenceUrls: string[];
+};

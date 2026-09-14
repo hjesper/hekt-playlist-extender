@@ -184,7 +184,7 @@ fn field_opt(row: &csv::StringRecord, i: usize) -> Option<String> {
     field(row, i).filter(|v| !v.is_empty())
 }
 
-fn split_title_version(title: &str) -> (String, Option<String>) {
+pub(crate) fn split_title_version(title: &str) -> (String, Option<String>) {
     let Some(open) = title.rfind('(') else {
         return (title.to_string(), None);
     };

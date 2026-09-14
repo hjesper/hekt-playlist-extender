@@ -24,6 +24,16 @@ export const FetchTrackPayload = z.object({
   challengeTimeoutMs: z.number().int().min(5_000).max(300_000).default(180_000),
 });
 
+export const FetchAppearancesPayload = FetchTrackPayload.extend({
+  limit: z.number().int().min(1).max(25).default(25),
+});
+
+export const FetchTracklistPayload = z.object({
+  url: z.string().url(),
+  interactive: z.boolean().default(false),
+  challengeTimeoutMs: z.number().int().min(5_000).max(300_000).default(180_000),
+});
+
 export function errorResponse(requestId: string, code: string, message: string, retryable = false): Response {
   return { version: PROTOCOL_VERSION, requestId, ok: false, error: { code, message, retryable } };
 }
